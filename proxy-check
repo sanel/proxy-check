@@ -1,0 +1,102 @@
+;; -*- mode: newlisp; indent-tabs-mode: nil; -*-
+;;
+;; Copyright (c) 2017 Sanel Zukan
+;;
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+;;
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+;;
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+(define *test-host* "http://google.com")
+
+(define (help)
+  (println "Usage: proxy-check [options] [file]")
+  (println "  -h   this help")
+  (println "  -s   expect socks proxies (default is http)")
+  (println "  -m   run multiprocess"))
+
+(define (partition-all n coll)
+  (let ((ret '())
+        (agg '()))
+    (dolist (item coll)
+      (when (= (length agg) n)
+        (setq ret (cons (reverse agg) ret)
+              agg '()))
+      (setq agg (cons item agg)))
+    (reverse
+     (if (empty? agg)
+       ret
+       (cons (reverse agg) ret)))))
+
+(define (proxy-tester proxy socks? verbose?)
+  (letn ((host    *test-host*)
+         (timeout "3")
+         (cmd (format "curl -L %s -s %s %s %s --connect-timeout %s --max-time %s"
+                      (if verbose? "-v" "")
+                      host
+                      (if socks? "--socks4" "--proxy")
+                      proxy
+                      timeout
+                      timeout)))
+    (exec cmd)))
+
+(define (do-report out)
+  (if (or (empty? out)
+          (= "Maximum number of open" (trim (first out))))
+    "bad"
+    "good"))
+
+;; single process scanner; works on per-line basis
+(define (file-scanner-sp path on-line-fn)
+  (let ((fd (open path "r")))
+    (if-not fd
+      (println "Failed to read:" path)
+      (begin
+        (while (read-line fd)
+          (on-line-fn (current-line)))
+        (close fd)))))
+
+;; multi-process scanner; works on chunks
+(define (file-scanner-mp path on-line-fn)
+  (let ((body (read-file path)))
+    (if-not body
+      (println "Failed to read:" path)
+      (letn ((lines  (parse body "\n"))
+             ;; we are expecting 3 processes max to be executed
+             (chunks (partition-all 3 lines)))
+        (dolist (ips chunks)
+          (letn ((ips ips)
+                 (o1  (pop ips))
+                 (o2  (pop ips))
+                 (o3  (pop ips)))
+            (when o1 (spawn 'p1 (on-line-fn o1)))
+            (when o2 (spawn 'p2 (on-line-fn o2)))
+            (when o3 (spawn 'p3 (on-line-fn o3))))
+          (sync 60000))))))
+
+(define (main)
+  (let ((socks? false)
+        (margs  (rest (main-args)))
+        (runner file-scanner-sp))
+    (dolist (arg margs)
+      (case arg
+        ("-h" (begin
+                (help)
+                (exit 1)))
+        ("-s" (setq socks? true))
+        ("-m" (setq runner file-scanner-mp))))
+    (runner (last margs) (fn (x)
+                           (let ((result (do-report
+                                          (proxy-tester x socks?))))
+                             (println x " " result)))) ))
+
+(main)
+(exit 1)
